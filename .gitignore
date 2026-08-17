@@ -1,12 +1,31 @@
-# Haider Ali OpenCode System — ignore runtime and secret files
-logs/
+# Logs
 *.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Termux/Haider Ali runtime
+.haider-ali-opencode/
+
+# Node
+node_modules/
+package-lock.json
+
+# Secrets
 .env
 .env.*
 secrets/
 credentials/
 private/
-tmp/
-*.tmp
-*.swp
-.DS_Store
+*.key

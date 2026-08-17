@@ -1,197 +1,785 @@
 #!/usr/bin/env bash
 #
-# install.sh — Haider Ali OpenCode System (professional orchestrator).
+# ============================================================================
+#  HAIDER ALI — OPENCODE PROFESSIONAL INSTALLER
+# ============================================================================
 #
-# Termux → Ubuntu → Node.js → OpenCode AI
+#  File    : install.sh
+#  Version : 1.0.0
+#  Purpose : Master controller for the Haider-Ali-OpenCode installation system
 #
-# This script is an orchestrator only. All implementation lives in the
-# configuration, libraries and command modules below.
+#  Architecture:
 #
-# Failure handling is explicit: global `set -e` / `set -u` are intentionally
-# not enabled. Every critical command's exit status is captured, classified
-# and routed through the recovery engine.
+#      install.sh
+#          │
+#          ├── config.sh
+#          │
+#          ├── lib/ui.sh
+#          ├── lib/system.sh
+#          ├── lib/recovery.sh
+#          └── lib/opencode.sh
+#
+#  Flow:
+#
+#      Preflight
+#          ↓
+#      Load Configuration
+#          ↓
+#      Initialize UI / Logging
+#          ↓
+#      Validate Modules
+#          ↓
+#      Execute Installation Pipeline
+#          ↓
+#      Verify Installation
+#          ↓
+#      Launch OpenCode
+#
+# ============================================================================
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set -o pipefail
 
-# shellcheck source=config.sh
-. "$PROJECT_ROOT/config.sh"
+# ----------------------------------------------------------------------------
+# Strictness
+# ----------------------------------------------------------------------------
+#
+# We intentionally do NOT use `set -e`.
+#
+# Why?
+# The installer contains a recovery system. A failed command must be captured
+# and passed to the recovery layer instead of immediately terminating the
+# entire installer.
+#
+# Individual modules are responsible for checking command failures.
+# ----------------------------------------------------------------------------
 
-# shellcheck disable=SC1091 # libs are sourced through a dynamic name
-for lib in logger ui runner checker recovery system ubuntu opencode; do
-  # shellcheck source=lib/$lib.sh
-  . "$PROJECT_ROOT/lib/$lib.sh"
-done
+# ----------------------------------------------------------------------------
+# Global paths
+# ----------------------------------------------------------------------------
 
-# shellcheck disable=SC2034 # read by commands/*.sh guards
-HAIDER_OPENCODE_LOADED=1
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# shellcheck disable=SC1091 # command modules are sourced dynamically
-for cmd in "$PROJECT_ROOT"/commands/*.sh; do
-  # shellcheck source=commands/$cmd
-  . "$cmd"
-done
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
+LIB_DIR="${SCRIPT_DIR}/lib"
 
-usage() {
-  cat <<EOF
-Usage: $0 [options]
+UI_FILE="${LIB_DIR}/ui.sh"
+SYSTEM_FILE="${LIB_DIR}/system.sh"
+RECOVERY_FILE="${LIB_DIR}/recovery.sh"
+OPENCODE_FILE="${LIB_DIR}/opencode.sh"
 
-Options:
-  --help       Show this help and exit
-  --version    Show version information and exit
-  --no-color   Disable ANSI colours
-  --no-log     Disable file logging
-  --check      Verify the environment and exit without installing
-EOF
+# ----------------------------------------------------------------------------
+# Runtime information
+# ----------------------------------------------------------------------------
+
+INSTALLER_NAME="Haider Ali — OpenCode Professional Installer"
+INSTALLER_VERSION="1.0.0"
+
+START_TIME="$(date +%s)"
+
+INSTALLER_EXIT_CODE=0
+CURRENT_STAGE="Initialization"
+
+# ----------------------------------------------------------------------------
+# Basic terminal helpers
+# ----------------------------------------------------------------------------
+
+print_fatal() {
+    printf '\n'
+    printf '%s\n' "============================================================"
+    printf '%s\n' "FATAL INSTALLER ERROR"
+    printf '%s\n' "============================================================"
+    printf '%s\n' "$1"
+    printf '%s\n' "============================================================"
+    printf '\n'
 }
 
-env_status() {
-  local fn="$1"
-  if "$fn" >/dev/null 2>&1; then
-    printf 'OK'
-  else
-    printf 'MISSING'
-  fi
+print_info() {
+    printf '[INFO] %s\n' "$1"
 }
 
-check_environment_report() {
-  local s
-  printf '%s\n' "----------------------------------------"
-  printf '%-22s %s\n' "COMPONENT" "STATUS"
-  printf '%s\n' "----------------------------------------"
-  s=$(env_status check_termux);       printf '%-22s %s\n' "Termux"          "$s"
-  s=$(env_status check_android);      printf '%-22s %s\n' "Android"         "$s"
-  s=$(env_status check_network);      printf '%-22s %s\n' "Network"         "$s"
-  s=$(env_status check_storage);      printf '%-22s %s\n' "Shared storage"  "$s"
-  s=$(env_status check_pkg);          printf '%-22s %s\n' "pkg"             "$s"
-  s=$(env_status check_proot_distro); printf '%-22s %s\n' "proot-distro"    "$s"
-  printf '%-22s %s\n' "Ubuntu" "$(ubuntu_detect_state)"
-  s=$(env_status check_curl);         printf '%-22s %s\n' "curl"            "$s"
-  s=$(env_status check_node);         printf '%-22s %s\n' "Node.js"         "$s"
-  s=$(env_status check_npm);          printf '%-22s %s\n' "npm"             "$s"
-  s=$(env_status check_opencode);     printf '%-22s %s\n' "OpenCode"        "$s"
-  printf '%-22s %s\n' "Architecture" "$(check_architecture)"
+print_error() {
+    printf '[ERROR] %s\n' "$1" >&2
 }
 
-run_stage_or_abort() {
-  local number="$1" name="$2" fn="$3"
-  local rc
-  run_step "$number" "$STAGE_TOTAL" "$name" "$fn"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    recovery_summary
-    ui_abort_screen "$rc"
-    return "$rc"
-  fi
-  return 0
+# ----------------------------------------------------------------------------
+# Detect Termux
+# ----------------------------------------------------------------------------
+#
+# This project is specifically designed for Android + Termux.
+#
+# We therefore refuse to continue if the script is executed in an unrelated
+# Linux environment.
+# ----------------------------------------------------------------------------
+
+detect_termux() {
+
+    CURRENT_STAGE="Termux Environment"
+
+    if [[ -n "${TERMUX_VERSION:-}" ]]; then
+        return 0
+    fi
+
+    if [[ -d "/data/data/com.termux" ]]; then
+        return 0
+    fi
+
+    if [[ "${PREFIX:-}" == *"/com.termux/"* ]]; then
+        return 0
+    fi
+
+    print_fatal \
+        "This installer must be executed inside Termux on Android.
+
+Please open Termux and run the installer again."
+
+    return 1
 }
+
+# ----------------------------------------------------------------------------
+# Check Bash version
+# ----------------------------------------------------------------------------
+
+check_bash_version() {
+
+    CURRENT_STAGE="Bash Compatibility"
+
+    local major_version="${BASH_VERSINFO[0]:-0}"
+
+    if (( major_version < 4 )); then
+        print_fatal \
+            "Bash 4 or newer is required.
+
+Detected Bash version:
+${BASH_VERSION}"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Check required local files
+# ----------------------------------------------------------------------------
+#
+# install.sh depends on the project's modular architecture.
+#
+# This function deliberately validates every module before execution.
+# ----------------------------------------------------------------------------
+
+validate_project_structure() {
+
+    CURRENT_STAGE="Project Structure Validation"
+
+    local required_files=(
+        "$CONFIG_FILE"
+        "$UI_FILE"
+        "$SYSTEM_FILE"
+        "$RECOVERY_FILE"
+        "$OPENCODE_FILE"
+    )
+
+    local missing_files=()
+    local file
+
+    for file in "${required_files[@]}"; do
+
+        if [[ ! -f "$file" ]]; then
+            missing_files+=("$file")
+        fi
+
+    done
+
+    if (( ${#missing_files[@]} > 0 )); then
+
+        print_fatal "One or more required installer modules are missing."
+
+        printf '%s\n' "Missing files:"
+        printf '  - %s\n' "${missing_files[@]}"
+
+        printf '\n'
+        printf '%s\n' \
+            "The installer architecture is incomplete."
+
+        printf '%s\n' \
+            "Create the missing modules before running install.sh."
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Validate module readability
+# ----------------------------------------------------------------------------
+
+validate_module_permissions() {
+
+    CURRENT_STAGE="Module Permission Validation"
+
+    local modules=(
+        "$CONFIG_FILE"
+        "$UI_FILE"
+        "$SYSTEM_FILE"
+        "$RECOVERY_FILE"
+        "$OPENCODE_FILE"
+    )
+
+    local file
+
+    for file in "${modules[@]}"; do
+
+        if [[ ! -r "$file" ]]; then
+
+            print_fatal \
+                "Installer module is not readable:
+
+$file"
+
+            return 1
+        fi
+
+    done
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Load configuration
+# ----------------------------------------------------------------------------
+
+load_configuration() {
+
+    CURRENT_STAGE="Configuration Loading"
+
+    # shellcheck source=/dev/null
+    if ! source "$CONFIG_FILE"; then
+
+        print_fatal \
+            "Failed to load configuration:
+
+$CONFIG_FILE"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Load UI module
+# ----------------------------------------------------------------------------
+
+load_ui_module() {
+
+    CURRENT_STAGE="UI Module Loading"
+
+    # shellcheck source=/dev/null
+    if ! source "$UI_FILE"; then
+
+        print_fatal \
+            "Failed to load UI module:
+
+$UI_FILE"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Load system module
+# ----------------------------------------------------------------------------
+
+load_system_module() {
+
+    CURRENT_STAGE="System Module Loading"
+
+    # shellcheck source=/dev/null
+    if ! source "$SYSTEM_FILE"; then
+
+        print_fatal \
+            "Failed to load system module:
+
+$SYSTEM_FILE"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Load recovery module
+# ----------------------------------------------------------------------------
+
+load_recovery_module() {
+
+    CURRENT_STAGE="Recovery Module Loading"
+
+    # shellcheck source=/dev/null
+    if ! source "$RECOVERY_FILE"; then
+
+        print_fatal \
+            "Failed to load recovery module:
+
+$RECOVERY_FILE"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Load OpenCode module
+# ----------------------------------------------------------------------------
+
+load_opencode_module() {
+
+    CURRENT_STAGE="OpenCode Module Loading"
+
+    # shellcheck source=/dev/null
+    if ! source "$OPENCODE_FILE"; then
+
+        print_fatal \
+            "Failed to load OpenCode module:
+
+$OPENCODE_FILE"
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Verify required functions
+# ----------------------------------------------------------------------------
+#
+# The modules are intentionally treated as components with an interface.
+#
+# This protects the master installer from silently continuing when a module
+# exists but does not provide the functions required by the architecture.
+# ----------------------------------------------------------------------------
+
+require_function() {
+
+    local function_name="$1"
+
+    if ! declare -F "$function_name" >/dev/null 2>&1; then
+
+        print_fatal \
+            "Required installer function is missing:
+
+${function_name}
+
+The corresponding module may be incomplete or incompatible."
+
+        return 1
+    fi
+
+    return 0
+}
+
+validate_module_interfaces() {
+
+    CURRENT_STAGE="Module Interface Validation"
+
+    # UI interface
+    require_function "ui_init" || return 1
+    require_function "ui_banner" || return 1
+    require_function "ui_stage_start" || return 1
+    require_function "ui_stage_pass" || return 1
+    require_function "ui_stage_fail" || return 1
+    require_function "ui_info" || return 1
+    require_function "ui_error" || return 1
+
+    # System interface
+    require_function "system_preflight" || return 1
+    require_function "system_install" || return 1
+    require_function "system_verify" || return 1
+
+    # Recovery interface
+    require_function "recovery_init" || return 1
+    require_function "recovery_execute" || return 1
+
+    # OpenCode interface
+    require_function "opencode_install" || return 1
+    require_function "opencode_verify" || return 1
+    require_function "opencode_launch" || return 1
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Safe stage executor
+# ----------------------------------------------------------------------------
+#
+# This is the central execution wrapper.
+#
+# Every major operation passes through this layer.
+#
+# Normal flow:
+#
+#     START
+#       ↓
+#     Execute
+#       ↓
+#     PASS ───────────────→ Continue
+#
+# Failure:
+#
+#     START
+#       ↓
+#     Execute
+#       ↓
+#     FAIL
+#       ↓
+#     Recovery
+#       ↓
+#     Retry
+#       ↓
+#     PASS / FINAL FAIL
+#
+# The actual recovery intelligence lives in recovery.sh.
+# ----------------------------------------------------------------------------
+
+run_stage() {
+
+    local stage_name="$1"
+    local stage_function="$2"
+    shift 2
+
+    CURRENT_STAGE="$stage_name"
+
+    ui_stage_start "$stage_name"
+
+    if "$stage_function" "$@"; then
+
+        ui_stage_pass "$stage_name"
+
+        return 0
+    fi
+
+    ui_stage_fail "$stage_name"
+
+    ui_error "Stage failed: $stage_name"
+
+    ui_info "Starting recovery procedure..."
+
+    if recovery_execute "$stage_name" "$stage_function" "$@"; then
+
+        ui_stage_pass "$stage_name"
+
+        return 0
+    fi
+
+    ui_error "Recovery failed for: $stage_name"
+
+    return 1
+}
+
+# ----------------------------------------------------------------------------
+# Main installation pipeline
+# ----------------------------------------------------------------------------
+
+run_installation_pipeline() {
+
+    CURRENT_STAGE="Installation Pipeline"
+
+    # ------------------------------------------------------------
+    # Stage 01 — System Preflight
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "System Preflight" \
+        system_preflight; then
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Stage 02 — Main System Installation
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "Termux / Ubuntu Environment" \
+        system_install; then
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Stage 03 — System Verification
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "System Verification" \
+        system_verify; then
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Stage 04 — OpenCode Installation
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "OpenCode Installation" \
+        opencode_install; then
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Stage 05 — OpenCode Verification
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "OpenCode Verification" \
+        opencode_verify; then
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Stage 06 — OpenCode Launch
+    # ------------------------------------------------------------
+
+    if ! run_stage \
+        "OpenCode Launch" \
+        opencode_launch; then
+
+        return 1
+    fi
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Final success screen
+# ----------------------------------------------------------------------------
+
+installation_success() {
+
+    local end_time
+    local elapsed
+
+    end_time="$(date +%s)"
+    elapsed=$(( end_time - START_TIME ))
+
+    printf '\n'
+
+    if declare -F ui_success >/dev/null 2>&1; then
+
+        ui_success \
+            "HAIDER ALI OPENCODE SYSTEM READY"
+
+        ui_info "Installation completed successfully."
+        ui_info "Total installation time: ${elapsed}s"
+
+    else
+
+        printf '%s\n' \
+            "HAIDER ALI OPENCODE SYSTEM READY"
+
+        printf '%s\n' \
+            "Installation completed successfully."
+
+        printf '%s\n' \
+            "Total installation time: ${elapsed}s"
+    fi
+
+    printf '\n'
+
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Final failure screen
+# ----------------------------------------------------------------------------
+
+installation_failure() {
+
+    local end_time
+    local elapsed
+
+    end_time="$(date +%s)"
+    elapsed=$(( end_time - START_TIME ))
+
+    printf '\n'
+
+    if declare -F ui_error >/dev/null 2>&1; then
+
+        ui_error "INSTALLATION FAILED"
+
+        ui_info "Failed stage: ${CURRENT_STAGE}"
+        ui_info "Elapsed time: ${elapsed}s"
+
+    else
+
+        print_error "INSTALLATION FAILED"
+        print_error "Failed stage: ${CURRENT_STAGE}"
+        print_error "Elapsed time: ${elapsed}s"
+
+    fi
+
+    printf '\n'
+
+    return 1
+}
+
+# ----------------------------------------------------------------------------
+# Cleanup handler
+# ----------------------------------------------------------------------------
+
+cleanup() {
+
+    local exit_code="$?"
+
+    if (( exit_code != 0 )); then
+        INSTALLER_EXIT_CODE="$exit_code"
+    fi
+}
+
+trap cleanup EXIT
+
+# ----------------------------------------------------------------------------
+# Interrupt handler
+# ----------------------------------------------------------------------------
+
+handle_interrupt() {
+
+    printf '\n\n'
+
+    if declare -F ui_error >/dev/null 2>&1; then
+        ui_error "Installation interrupted by user."
+    else
+        print_error "Installation interrupted by user."
+    fi
+
+    CURRENT_STAGE="Interrupted"
+
+    exit 130
+}
+
+trap handle_interrupt INT TERM
+
+# ----------------------------------------------------------------------------
+# MAIN
+# ----------------------------------------------------------------------------
 
 main() {
-  local arg rc
-  for arg in "$@"; do
-    case "$arg" in
-      --help)
-        usage
-        return 0
-        ;;
-      --version)
-        printf '%s\n' "$APP_NAME — version $APP_VERSION"
-        return 0
-        ;;
-      --no-color)
-        # shellcheck disable=SC2034 # read by ui_init at runtime
-        ENABLE_COLORS="false"
-        ;;
-      --no-log)
-        # shellcheck disable=SC2034 # read by log_init at runtime
-        ENABLE_LOGGING="false"
-        ;;
-      --check)
-        DO_CHECK_ONLY="true"
-        ;;
-      *)
-        printf '%s\n' "Unknown option: $arg" >&2
-        usage >&2
-        return 2
-        ;;
-    esac
-  done
 
-  ui_init
-  if ! log_init; then
-    printf '%s\n' "ERROR: could not initialize logging directory: $LOG_DIRECTORY" >&2
-    return 1
-  fi
-  recovery_init
+    # ------------------------------------------------------------
+    # Bootstrap checks
+    # ------------------------------------------------------------
 
-  ui_banner
-  ui_secondary "Owner:   $APP_OWNER"
-  ui_secondary "Version: $APP_VERSION"
-  ui_secondary "Log file: $LOG_FILE"
-  printf '\n'
+    if ! check_bash_version; then
+        return 1
+    fi
 
-  log_info "=== $APP_NAME v$APP_VERSION — run started ==="
-  log_info "Bash: $BASH_VERSION | Arch: $(check_architecture)"
+    if ! detect_termux; then
+        return 1
+    fi
 
-  ui_header "Environment Verification"
-  if ! check_termux; then
-    ui_error "This installer must be executed inside Termux on Android."
-    ui_secondary "The current environment does not look like Termux."
-    ui_abort_screen 1
-    log_result "ABORT: environment is not Termux"
-    return 1
-  fi
-  ui_success "Termux environment detected."
+    # ------------------------------------------------------------
+    # Project structure
+    # ------------------------------------------------------------
 
-  if check_network; then
-    ui_success "Network connectivity confirmed."
-  else
-    ui_warn "Network check failed now — it will be re-verified before each network stage."
-  fi
+    if ! validate_project_structure; then
+        return 1
+    fi
 
-  if check_android; then
-    ui_success "Android platform confirmed."
-  else
-    ui_warn "Android markers not detected; continuing with Termux assumptions."
-  fi
+    if ! validate_module_permissions; then
+        return 1
+    fi
 
-  ui_secondary "Architecture: $(check_architecture)"
+    # ------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------
 
-  if [ "$DO_CHECK_ONLY" = "true" ]; then
-    printf '\n'
-    ui_header "Environment Report"
-    check_environment_report
-    printf '\n'
+    if ! load_configuration; then
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------
+
+    if ! load_ui_module; then
+        return 1
+    fi
+
+    if ! ui_init; then
+        return 1
+    fi
+
+    ui_banner \
+        "$INSTALLER_NAME" \
+        "$INSTALLER_VERSION"
+
+    # ------------------------------------------------------------
+    # Remaining modules
+    # ------------------------------------------------------------
+
+    if ! load_system_module; then
+        ui_error "System module could not be loaded."
+        return 1
+    fi
+
+    if ! load_recovery_module; then
+        ui_error "Recovery module could not be loaded."
+        return 1
+    fi
+
+    if ! load_opencode_module; then
+        ui_error "OpenCode module could not be loaded."
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Interface validation
+    # ------------------------------------------------------------
+
+    if ! validate_module_interfaces; then
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Initialize subsystems
+    # ------------------------------------------------------------
+
+    if ! recovery_init; then
+        ui_error "Recovery system initialization failed."
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Execute installation
+    # ------------------------------------------------------------
+
+    if ! run_installation_pipeline; then
+
+        installation_failure
+
+        return 1
+    fi
+
+    # ------------------------------------------------------------
+    # Success
+    # ------------------------------------------------------------
+
+    installation_success
+
     return 0
-  fi
-
-  printf '\n'
-  ui_header "Installation Stages"
-
-  run_stage_or_abort 1  "${STAGE_NAMES[0]}"  stage_01_termux_update   || return $?
-  run_stage_or_abort 2  "${STAGE_NAMES[1]}"  stage_02_proot_distro    || return $?
-  run_stage_or_abort 3  "${STAGE_NAMES[2]}"  stage_03_storage         || return $?
-  run_stage_or_abort 4  "${STAGE_NAMES[3]}"  stage_04_ubuntu          || return $?
-  run_stage_or_abort 5  "${STAGE_NAMES[4]}"  stage_05_ubuntu_login    || return $?
-  run_stage_or_abort 6  "${STAGE_NAMES[5]}"  stage_06_ubuntu_update   || return $?
-  run_stage_or_abort 7  "${STAGE_NAMES[6]}"  stage_07_curl            || return $?
-  run_stage_or_abort 8  "${STAGE_NAMES[7]}"  stage_08_node_repository || return $?
-  run_stage_or_abort 9  "${STAGE_NAMES[8]}"  stage_09_nodejs          || return $?
-  run_stage_or_abort 10 "${STAGE_NAMES[9]}"  stage_10_opencode        || return $?
-
-  if run_step_plain 11 "${STAGE_NAMES[10]}" stage_11_launch; then
-    rc=0
-  else
-    rc=$?
-    ui_abort_screen "$rc"
-  fi
-
-  printf '\n'
-  ui_success "Thank you for using $APP_NAME."
-  ui_secondary "Log file: $LOG_FILE"
-  log_result "INSTALLATION COMPLETE"
-  return "$rc"
 }
 
-DO_CHECK_ONLY="false"
+# ----------------------------------------------------------------------------
+# Start
+# ----------------------------------------------------------------------------
+
 main "$@"
-exit $?
