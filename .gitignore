@@ -1,0 +1,12 @@
+# Haider Ali OpenCode System — ignore runtime and secret files
+logs/
+*.log
+.env
+.env.*
+secrets/
+credentials/
+private/
+tmp/
+*.tmp
+*.swp
+.DS_Store
